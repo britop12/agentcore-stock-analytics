@@ -34,9 +34,9 @@ variable "cognito_app_client_id" {
   description = "Cognito App Client ID"
 }
 
-variable "kb_s3_vectors_bucket" {
+variable "bedrock_kb_id" {
   type        = string
-  description = "S3 Vectors bucket name used by the knowledge base"
+  description = "Bedrock Knowledge Base ID for document retrieval"
 }
 
 variable "langfuse_public_key" {

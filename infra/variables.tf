@@ -1,7 +1,7 @@
 variable "app_name" {
   type        = string
   description = "Application name used for resource naming"
-  default     = "aws-stock-agent"
+  default     = "stock-agent"
 }
 
 variable "region" {

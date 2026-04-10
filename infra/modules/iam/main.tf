@@ -13,6 +13,11 @@ resource "aws_iam_role" "agentcore_execution" {
         Effect    = "Allow"
         Principal = { Service = "bedrock.amazonaws.com" }
         Action    = "sts:AssumeRole"
+      },
+      {
+        Effect    = "Allow"
+        Principal = { Service = "bedrock-agentcore.amazonaws.com" }
+        Action    = "sts:AssumeRole"
       }
     ]
   })
@@ -30,20 +35,15 @@ resource "aws_iam_policy" "agentcore_execution" {
         Effect = "Allow"
         Action = [
           "ecr:GetDownloadUrlForLayer",
-          "ecr:BatchGetImage",
-          "ecr:GetAuthorizationToken"
+          "ecr:BatchGetImage"
         ]
         Resource = var.ecr_repository_arn
       },
       {
-        Sid    = "S3VectorsReadWrite"
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:ListBucket"
-        ]
-        Resource = var.s3_vectors_bucket_arn
+        Sid      = "ECRAuth"
+        Effect   = "Allow"
+        Action   = ["ecr:GetAuthorizationToken"]
+        Resource = "*"
       },
       {
         Sid    = "CloudWatchLogsWrite"
@@ -62,7 +62,18 @@ resource "aws_iam_policy" "agentcore_execution" {
           "bedrock:InvokeModel",
           "bedrock:InvokeModelWithResponseStream"
         ]
-        Resource = "arn:aws:bedrock:${var.region}::foundation-model/anthropic.claude-haiku-4-5"
+        Resource = [
+          "arn:aws:bedrock:*::foundation-model/anthropic.*",
+          "arn:aws:bedrock:*:${var.account_id}:inference-profile/*"
+        ]
+      },
+      {
+        Sid    = "BedrockKBRetrieve"
+        Effect = "Allow"
+        Action = [
+          "bedrock:Retrieve"
+        ]
+        Resource = "arn:aws:bedrock:${var.region}:${var.account_id}:knowledge-base/${var.knowledge_base_id}"
       }
     ]
   })

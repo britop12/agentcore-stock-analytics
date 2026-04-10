@@ -18,10 +18,10 @@ import os
 from typing import Literal
 
 from langchain_aws import ChatBedrock
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 
-from app.agent import knowledge_base as kb_module
+from app.agent.knowledge_base import retrieve_knowledge_base
 from app.agent.observability import get_callback_handler
 from app.agent.tools import retrieve_historical_stock_price, retrieve_realtime_stock_price
 from app.models import AgentState
@@ -40,22 +40,19 @@ MAX_ITERATIONS: int = int(os.environ.get("MAX_ITERATIONS", "10"))
 # ---------------------------------------------------------------------------
 
 llm = ChatBedrock(
-    model_id="anthropic.claude-haiku-4-5",
+    model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
     region_name=AWS_REGION,
     streaming=True,
 )
 
-_tools = [retrieve_realtime_stock_price, retrieve_historical_stock_price]
+_tools = [retrieve_realtime_stock_price, retrieve_historical_stock_price, retrieve_knowledge_base]
 llm_with_tools = llm.bind_tools(_tools)
 
 # ---------------------------------------------------------------------------
 # Tool dispatch map
 # ---------------------------------------------------------------------------
 
-_TOOL_MAP = {
-    "retrieve_realtime_stock_price": retrieve_realtime_stock_price,
-    "retrieve_historical_stock_price": retrieve_historical_stock_price,
-}
+_TOOL_MAP = {t.name: t for t in _tools}
 
 # ---------------------------------------------------------------------------
 # Nodes
@@ -65,9 +62,9 @@ _TOOL_MAP = {
 def reason(state: AgentState) -> AgentState:
     """Call the LLM with current messages; increment iteration counter."""
     callback = get_callback_handler()
-    config = {"callbacks": [callback]} if callback else {}
+    kwargs = {"config": {"callbacks": [callback]}} if callback else {}
 
-    response: AIMessage = llm_with_tools.invoke(state["messages"], **config)
+    response: AIMessage = llm_with_tools.invoke(state["messages"], **kwargs)
 
     return {
         **state,
@@ -87,11 +84,7 @@ def tool_executor(state: AgentState) -> AgentState:
         tool_args: dict = tc["args"]
         tool_call_id: str = tc["id"]
 
-        if tool_name == "retrieve_knowledge_base":
-            query = tool_args.get("query", state.get("query", ""))
-            result = kb_module.retrieve(query)
-            content = json.dumps(result)
-        elif tool_name in _TOOL_MAP:
+        if tool_name in _TOOL_MAP:
             tool_fn = _TOOL_MAP[tool_name]
             result = tool_fn.invoke(tool_args)
             content = json.dumps(result) if not isinstance(result, str) else result
@@ -116,7 +109,6 @@ def terminal(state: AgentState) -> AgentState:
     if state["iteration_count"] >= MAX_ITERATIONS and (
         last_message is None or not isinstance(last_message, AIMessage) or getattr(last_message, "tool_calls", None)
     ):
-        # Iteration limit exceeded — inject an error terminal message
         error_chunk = AIMessage(
             content=json.dumps({"type": "error", "data": "max iterations reached"})
         )
@@ -125,7 +117,6 @@ def terminal(state: AgentState) -> AgentState:
             "messages": state["messages"] + [error_chunk],
         }
 
-    # Normal terminal: the last AI message is already the final answer
     return state
 
 

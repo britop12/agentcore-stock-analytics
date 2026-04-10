@@ -67,6 +67,7 @@ async def _event_stream(request: InvokeRequest):
         yield f"data: {json.dumps(error_chunk)}\n\n"
 
 
+@router.post("/invocations")
 @router.post("/invoke")
 async def invoke(request: InvokeRequest) -> StreamingResponse:
     """

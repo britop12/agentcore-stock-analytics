@@ -17,3 +17,8 @@ output "cognito_user_pool_client_id" {
   description = "Cognito User Pool App Client ID"
   value       = module.cognito.user_pool_client_id
 }
+
+output "knowledge_base_id" {
+  description = "Bedrock Knowledge Base ID"
+  value       = module.knowledge_base.knowledge_base_id
+}
