@@ -20,7 +20,7 @@ _client = boto3.client("bedrock-agent-runtime", region_name=_REGION)
 
 
 @tool
-def retrieve_knowledge_base(query: str) -> list[str]:
+def retrieve_knowledge_base(query: str) -> str:
     """Search the Amazon financial documents knowledge base and return relevant passages.
 
     Use this tool when the user asks about Amazon's financial reports,
@@ -29,7 +29,7 @@ def retrieve_knowledge_base(query: str) -> list[str]:
     """
     if not _KB_ID:
         logger.warning("BEDROCK_KB_ID is not set; returning empty results")
-        return []
+        return "No knowledge base configured."
 
     try:
         response = _client.retrieve(
@@ -43,7 +43,7 @@ def retrieve_knowledge_base(query: str) -> list[str]:
         )
     except Exception as exc:
         logger.warning("Bedrock KB retrieve failed for query '%s': %s", query, exc)
-        return []
+        return f"Knowledge base retrieval failed: {exc}"
 
     results = response.get("retrievalResults", [])
     passages = []
@@ -54,5 +54,11 @@ def retrieve_knowledge_base(query: str) -> list[str]:
 
     if not passages:
         logger.info("No passages found for query: %s", query)
+        return "No relevant passages found."
 
-    return passages
+    # Return passages as numbered text so the LLM can read them clearly
+    output_parts = [f"Found {len(passages)} passages:\n"]
+    for i, p in enumerate(passages, 1):
+        output_parts.append(f"[Passage {i}]\n{p}\n")
+
+    return "\n".join(output_parts)

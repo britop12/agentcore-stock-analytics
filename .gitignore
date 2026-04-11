@@ -220,3 +220,6 @@ override.tf.json
 
 # Agentcore runtime ID (generated during deploy)
 infra/modules/agentcore/runtime_id.txt
+
+# Kiro
+.kiro/

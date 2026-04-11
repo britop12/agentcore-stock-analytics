@@ -10,12 +10,44 @@ from app.models import HistoricalDataPoint, StockToolResult
 logger = logging.getLogger(__name__)
 
 
+def _get_realtime_price(ticker: str) -> tuple[float | None, list[str]]:
+    """Try multiple yfinance methods to get the current price. Returns (price, errors)."""
+    t = yf.Ticker(ticker)
+    errors = []
+
+    try:
+        price = t.fast_info.last_price
+        if price is not None:
+            return float(price), errors
+        errors.append("fast_info: last_price was None")
+    except Exception as e:
+        errors.append(f"fast_info: {type(e).__name__}: {e}")
+
+    try:
+        info = t.info
+        price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
+        if price is not None:
+            return float(price), errors
+        errors.append(f"info: no price keys found, keys={list(info.keys())[:10]}")
+    except Exception as e:
+        errors.append(f"info: {type(e).__name__}: {e}")
+
+    try:
+        hist = t.history(period="1d")
+        if hist is not None and not hist.empty:
+            return float(hist["Close"].iloc[-1]), errors
+        errors.append(f"history(1d): empty={hist is None or hist.empty}")
+    except Exception as e:
+        errors.append(f"history: {type(e).__name__}: {e}")
+
+    return None, errors
+
+
 @tool
 def retrieve_realtime_stock_price(ticker: str) -> dict:
     """Returns the current market price for the given ticker symbol."""
     try:
-        info = yf.Ticker(ticker).fast_info
-        price = info.last_price
+        price, errors = _get_realtime_price(ticker)
 
         if price is None:
             return dataclasses.asdict(
@@ -23,12 +55,12 @@ def retrieve_realtime_stock_price(ticker: str) -> dict:
                     ticker=ticker,
                     error=True,
                     code="TICKER_NOT_FOUND",
-                    message=f"No price data found for ticker '{ticker}'.",
+                    message=f"No price data found for ticker '{ticker}'. Debug: {'; '.join(errors)}",
                 )
             )
 
         return dataclasses.asdict(
-            StockToolResult(ticker=ticker, error=False, price=float(price))
+            StockToolResult(ticker=ticker, error=False, price=price)
         )
 
     except (ConnectionError, TimeoutError) as exc:
@@ -65,12 +97,12 @@ def retrieve_realtime_stock_price(ticker: str) -> dict:
 
 
 @tool
-def retrieve_historical_stock_price(ticker: str, start_date: str, end_date: str) -> dict:
-    """Returns daily closing prices for the given ticker between start_date and end_date (YYYY-MM-DD)."""
+def retrieve_historical_stock_price(ticker: str, startDate: str, endDate: str) -> dict:
+    """Returns daily closing prices for the given ticker between startDate and endDate (YYYY-MM-DD)."""
     # Validate date range
     try:
-        start = date.fromisoformat(start_date)
-        end = date.fromisoformat(end_date)
+        start = date.fromisoformat(startDate)
+        end = date.fromisoformat(endDate)
     except ValueError as exc:
         return dataclasses.asdict(
             StockToolResult(
@@ -87,12 +119,17 @@ def retrieve_historical_stock_price(ticker: str, start_date: str, end_date: str)
                 ticker=ticker,
                 error=True,
                 code="INVALID_DATE_RANGE",
-                message=f"start_date '{start_date}' must not be after end_date '{end_date}'.",
+                message=f"startDate '{startDate}' must not be after endDate '{endDate}'.",
             )
         )
 
     try:
-        df = yf.Ticker(ticker).history(start=start_date, end=end_date)
+        t = yf.Ticker(ticker)
+        df = t.history(start=startDate, end=endDate)
+
+        # Fallback: try yf.download if history() returns empty
+        if df is None or df.empty:
+            df = yf.download(ticker, start=startDate, end=endDate, progress=False)
 
         if df is None or df.empty:
             return dataclasses.asdict(

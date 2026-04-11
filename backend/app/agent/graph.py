@@ -18,11 +18,10 @@ import os
 from typing import Literal
 
 from langchain_aws import ChatBedrock
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 
 from app.agent.knowledge_base import retrieve_knowledge_base
-from app.agent.observability import get_callback_handler
 from app.agent.tools import retrieve_historical_stock_price, retrieve_realtime_stock_price
 from app.models import AgentState
 
@@ -43,6 +42,7 @@ llm = ChatBedrock(
     model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
     region_name=AWS_REGION,
     streaming=True,
+    beta_use_converse_api=True,
 )
 
 _tools = [retrieve_realtime_stock_price, retrieve_historical_stock_price, retrieve_knowledge_base]
@@ -59,12 +59,21 @@ _TOOL_MAP = {t.name: t for t in _tools}
 # ---------------------------------------------------------------------------
 
 
+SYSTEM_PROMPT = (
+    "You are a financial research assistant. Use the provided tools to answer questions "
+    "about stock prices and Amazon financial data. Always use tools when you need data — "
+    "do not guess. Call one tool at a time and wait for the result before deciding next steps."
+)
+
+
 def reason(state: AgentState) -> AgentState:
     """Call the LLM with current messages; increment iteration counter."""
-    callback = get_callback_handler()
-    kwargs = {"config": {"callbacks": [callback]}} if callback else {}
+    messages = state["messages"]
+    # Ensure system message is always first
+    if not messages or not isinstance(messages[0], SystemMessage):
+        messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
 
-    response: AIMessage = llm_with_tools.invoke(state["messages"], **kwargs)
+    response: AIMessage = llm_with_tools.invoke(messages)
 
     return {
         **state,

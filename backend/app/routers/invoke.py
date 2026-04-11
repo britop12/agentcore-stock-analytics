@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.agent.graph import build_graph
+from app.agent.observability import get_callback_handler
 from app.models import InvokeRequest, StreamChunk
 
 logger = logging.getLogger(__name__)
@@ -21,36 +22,61 @@ graph = build_graph()
 
 
 async def _event_stream(request: InvokeRequest):
-    """Async generator that streams SSE chunks from the LangGraph agent."""
+    """Async generator that streams SSE chunks from the LangGraph agent.
+
+    Uses astream_events filtered by LLM invocations to get true token-by-token
+    streaming, plus tool call and tool result events.
+    Reference: https://langchain-ai.github.io/langgraph/how-tos/streaming/#filter-by-llm-invocation
+    """
     initial_state = {
         "messages": [HumanMessage(content=request.query)],
         "iteration_count": 0,
         "query": request.query,
     }
 
-    stream_gen = graph.astream(initial_state)
+    callback = get_callback_handler()
+    config = {"callbacks": [callback]} if callback else {}
+
     try:
-        async for chunk in stream_gen:
-            # chunk is a dict of node_name → state updates from LangGraph
-            for node_name, state_update in chunk.items():
-                messages = state_update.get("messages", [])
-                if not messages:
-                    continue
+        async for event in graph.astream_events(initial_state, config=config, version="v2"):
+            kind = event.get("event", "")
+            data = event.get("data", {})
 
-                last_message = messages[-1]
-                content = getattr(last_message, "content", "") or ""
+            # Stream LLM tokens as they arrive
+            if kind == "on_chat_model_stream":
+                chunk = data.get("chunk")
+                if chunk:
+                    content = getattr(chunk, "content", "")
+                    # Handle string content
+                    if content and isinstance(content, str):
+                        stream_chunk: StreamChunk = {"type": "token", "data": content}
+                        yield f"data: {json.dumps(stream_chunk)}\n\n"
+                    # Handle list content (Converse API returns list of dicts)
+                    elif content and isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict):
+                                text = block.get("text", "")
+                            elif isinstance(block, str):
+                                text = block
+                            else:
+                                text = str(block)
+                            if text:
+                                stream_chunk = {"type": "token", "data": text}
+                                yield f"data: {json.dumps(stream_chunk)}\n\n"
 
-                # Try to parse content as a StreamChunk JSON
-                stream_chunk: StreamChunk
-                try:
-                    parsed = json.loads(content)
-                    if isinstance(parsed, dict) and "type" in parsed:
-                        stream_chunk = {"type": parsed["type"], "data": parsed.get("data", "")}
-                    else:
-                        stream_chunk = {"type": "token", "data": str(content)}
-                except (json.JSONDecodeError, TypeError):
-                    stream_chunk = {"type": "token", "data": str(content)}
+            # Emit tool call events
+            elif kind == "on_tool_start":
+                tool_name = event.get("name", "")
+                tool_input = data.get("input", {})
+                stream_chunk = {"type": "tool_call", "data": json.dumps({"tool": tool_name, "input": tool_input})}
+                yield f"data: {json.dumps(stream_chunk)}\n\n"
 
+            # Emit tool result events
+            elif kind == "on_tool_end":
+                tool_name = event.get("name", "")
+                output = data.get("output", "")
+                output_str = str(output) if not isinstance(output, str) else output
+                stream_chunk = {"type": "tool_result", "data": json.dumps({"tool": tool_name, "result": output_str[:500]})}
                 yield f"data: {json.dumps(stream_chunk)}\n\n"
 
         # Terminal event after stream ends normally
@@ -59,10 +85,6 @@ async def _event_stream(request: InvokeRequest):
 
     except Exception as exc:
         logger.error("Stream interrupted: %s", exc, exc_info=True)
-        try:
-            await stream_gen.aclose()
-        except Exception:
-            pass
         error_chunk: StreamChunk = {"type": "error", "data": str(exc)}
         yield f"data: {json.dumps(error_chunk)}\n\n"
 

@@ -98,11 +98,6 @@ resource "aws_s3_bucket" "kb_data" {
   }
 }
 
-resource "aws_s3_bucket_versioning" "kb_data" {
-  bucket = aws_s3_bucket.kb_data.id
-  versioning_configuration { status = "Enabled" }
-}
-
 resource "aws_s3_bucket_public_access_block" "kb_data" {
   bucket                  = aws_s3_bucket.kb_data.id
   block_public_acls       = true

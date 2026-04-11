@@ -27,6 +27,19 @@ def get_callback_handler():
             secret_key=secret_key,
             host=host,
         )
+
+        # Link the @observe decorator context to this handler's trace
+        # so KB retrieval spans appear under the same trace
+        try:
+            from langfuse.decorators import langfuse_context
+            langfuse_context.configure(
+                public_key=public_key,
+                secret_key=secret_key,
+                host=host,
+            )
+        except Exception:
+            pass
+
         return handler
     except Exception as e:
         logging.warning("Langfuse observability unavailable: %s", e)

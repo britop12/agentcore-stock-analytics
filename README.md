@@ -32,10 +32,6 @@ aws s3api create-bucket \
   --bucket stock-agent-tf-state-$ACCOUNT_ID \
   --region us-east-1
 
-aws s3api put-bucket-versioning \
-  --bucket stock-agent-tf-state-$ACCOUNT_ID \
-  --versioning-configuration Status=Enabled
-
 aws dynamodb create-table \
   --table-name stock-agent-tf-lock \
   --attribute-definitions AttributeName=LockID,AttributeType=S \
@@ -58,9 +54,13 @@ backend "s3" {
 }
 ```
 
+If using AWS SSO, add `profile = "<your-sso-profile>"` to both the backend block in `backend.tf` and the provider block in `main.tf`.
+
 ### 3. Provision Infrastructure (Terraform)
 
-Terraform creates: Cognito, ECR, S3 Vectors, Bedrock Knowledge Base, IAM roles, and uploads/indexes the financial PDFs. The Agentcore Runtime is created separately via CLI (step 5).
+Terraform creates: Cognito, ECR, S3 Vectors, Bedrock Knowledge Base, IAM roles, and uploads/indexes the financial PDFs.
+
+> **Note:** Terraform also attempts to create the Agentcore Runtime via a `null_resource`. This will fail on the first run because the ECR image doesn't exist yet. This is expected — the remaining resources (Cognito, ECR, KB, IAM) will be created successfully. The runtime is created manually in step 5 after pushing the Docker image.
 
 ```bash
 cd infra
@@ -68,7 +68,8 @@ terraform init
 terraform apply \
   -var="account_id=$(aws sts get-caller-identity --query Account --output text)" \
   -var="langfuse_public_key=<your-langfuse-public-key>" \
-  -var="langfuse_secret_key=<your-langfuse-secret-key>"
+  -var="langfuse_secret_key=<your-langfuse-secret-key>" \
+  -var="langfuse_host=<your-langfuse-host>"
 ```
 
 Note the outputs — you'll need `ecr_repository_url`, `cognito_user_pool_id`, `cognito_user_pool_client_id`, and `knowledge_base_id`.
@@ -89,7 +90,7 @@ docker push $ECR_URL:v1.0.0
 
 ### 5. Create the Agentcore Runtime
 
-The Agentcore Runtime is created via AWS CLI because the Terraform provider doesn't fully support it yet. Replace the placeholder values with your Terraform outputs:
+The Agentcore Runtime is created via AWS CLI because the Terraform provider doesn't fully support it yet:
 
 ```bash
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -104,7 +105,7 @@ aws bedrock-agentcore-control create-agent-runtime \
   --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"$ECR_URL:v1.0.0\"}}" \
   --network-configuration '{"networkMode":"PUBLIC"}' \
   --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/stock-agent-agentcore-execution-role" \
-  --environment-variables "{\"AWS_REGION\":\"us-east-1\",\"BEDROCK_KB_ID\":\"$KB_ID\",\"COGNITO_APP_CLIENT_ID\":\"$CLIENT_ID\",\"COGNITO_REGION\":\"us-east-1\",\"COGNITO_USER_POOL_ID\":\"$POOL_ID\",\"LANGFUSE_HOST\":\"https://cloud.langfuse.com\",\"LANGFUSE_PUBLIC_KEY\":\"<your-langfuse-public-key>\",\"LANGFUSE_SECRET_KEY\":\"<your-langfuse-secret-key>\",\"MAX_ITERATIONS\":\"10\"}" \
+  --environment-variables "{\"AWS_REGION\":\"us-east-1\",\"BEDROCK_KB_ID\":\"$KB_ID\",\"COGNITO_APP_CLIENT_ID\":\"$CLIENT_ID\",\"COGNITO_REGION\":\"us-east-1\",\"COGNITO_USER_POOL_ID\":\"$POOL_ID\",\"LANGFUSE_HOST\":\"<your-langfuse-host>\",\"LANGFUSE_PUBLIC_KEY\":\"<your-langfuse-public-key>\",\"LANGFUSE_SECRET_KEY\":\"<your-langfuse-secret-key>\",\"MAX_ITERATIONS\":\"10\"}" \
   --authorizer-configuration "{\"customJWTAuthorizer\":{\"discoveryUrl\":\"https://cognito-idp.us-east-1.amazonaws.com/$POOL_ID/.well-known/openid-configuration\",\"allowedAudience\":[\"$CLIENT_ID\"]}}"
 ```
 
@@ -127,13 +128,14 @@ POOL_ID=$(terraform -chdir=infra output -raw cognito_user_pool_id)
 aws cognito-idp admin-create-user \
   --user-pool-id $POOL_ID \
   --username testuser \
-  --temporary-password "Temp1234!" \
+  --temporary-password 'Temp1234!' \
+  --user-attributes Name=email,Value=test@example.com Name=email_verified,Value=true \
   --region us-east-1
 
 aws cognito-idp admin-set-user-password \
   --user-pool-id $POOL_ID \
   --username testuser \
-  --password "MyPassword1!" \
+  --password 'MyPassword1!' \
   --permanent \
   --region us-east-1
 ```
@@ -149,7 +151,7 @@ RUNTIME_ID=$(aws bedrock-agentcore-control list-agent-runtimes --region us-east-
 JWT=$(aws cognito-idp initiate-auth \
   --auth-flow USER_PASSWORD_AUTH \
   --client-id $CLIENT_ID \
-  --auth-parameters USERNAME=testuser,PASSWORD="MyPassword1!" \
+  --auth-parameters USERNAME=testuser,PASSWORD='MyPassword1!' \
   --region us-east-1 \
   --query 'AuthenticationResult.IdToken' --output text)
 
@@ -157,20 +159,22 @@ JWT=$(aws cognito-idp initiate-auth \
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ARN="arn:aws:bedrock-agentcore:us-east-1:${ACCOUNT_ID}:runtime/${RUNTIME_ID}"
 ENCODED_ARN=$(python3 -c "from urllib.parse import quote; print(quote('$ARN', safe=''))")
+SESSION_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
 
 # Invoke (streaming SSE)
 curl -s -X POST \
   "https://bedrock-agentcore.us-east-1.amazonaws.com/runtimes/${ENCODED_ARN}/invocations" \
   -H "Authorization: Bearer $JWT" \
   -H "Content-Type: application/json" \
+  -H "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: $SESSION_ID" \
   -d '{"query": "What is the current price of AMZN?"}' \
-  --no-buffer | grep '^data:' | sed 's/^data: //' | jq -r 'select(.type == "token") | .data'
+  --no-buffer
 ```
 
 The response streams as SSE events:
 
 ```
-data: {"type": "token", "data": "The current price of AMZN is $195.60."}
+data: {"type": "token", "data": "The current price of AMZN is $203.28."}
 data: {"type": "final", "data": ""}
 ```
 
@@ -178,23 +182,29 @@ data: {"type": "final", "data": ""}
 
 ## Updating the Agent
 
-To deploy code changes:
+To deploy code changes, bump the image tag and update the runtime:
 
 ```bash
-# Bump the tag
+ECR_URL=$(terraform -chdir=infra output -raw ecr_repository_url)
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+POOL_ID=$(terraform -chdir=infra output -raw cognito_user_pool_id)
+CLIENT_ID=$(terraform -chdir=infra output -raw cognito_user_pool_client_id)
+KB_ID=$(terraform -chdir=infra output -raw knowledge_base_id)
+
 docker build --platform linux/arm64 -t $ECR_URL:v1.0.1 ./backend
 docker push $ECR_URL:v1.0.1
 
-# Update the runtime (all params required)
 aws bedrock-agentcore-control update-agent-runtime \
   --region us-east-1 \
   --agent-runtime-id $RUNTIME_ID \
   --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"$ECR_URL:v1.0.1\"}}" \
-  --network-configuration '{"networkMode":"PUBLIC"}' \
   --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/stock-agent-agentcore-execution-role" \
-  --environment-variables '...' \
-  --authorizer-configuration '...'
+  --network-configuration '{"networkMode":"PUBLIC"}' \
+  --authorizer-configuration "{\"customJWTAuthorizer\":{\"discoveryUrl\":\"https://cognito-idp.us-east-1.amazonaws.com/$POOL_ID/.well-known/openid-configuration\",\"allowedAudience\":[\"$CLIENT_ID\"]}}" \
+  --environment-variables "{\"AWS_REGION\":\"us-east-1\",\"BEDROCK_KB_ID\":\"$KB_ID\",\"COGNITO_APP_CLIENT_ID\":\"$CLIENT_ID\",\"COGNITO_REGION\":\"us-east-1\",\"COGNITO_USER_POOL_ID\":\"$POOL_ID\",\"LANGFUSE_HOST\":\"<your-langfuse-host>\",\"LANGFUSE_PUBLIC_KEY\":\"<your-langfuse-public-key>\",\"LANGFUSE_SECRET_KEY\":\"<your-langfuse-secret-key>\",\"MAX_ITERATIONS\":\"10\"}"
 ```
+
+> **Note:** `update-agent-runtime` replaces the full configuration. You must include all parameters (role, network, authorizer, environment variables) or they will be removed.
 
 ---
 
@@ -216,6 +226,9 @@ Injected into the container by Agentcore Runtime:
 |---|---|
 | `AWS_REGION` | AWS region (e.g. `us-east-1`) |
 | `BEDROCK_KB_ID` | Bedrock Knowledge Base ID |
+| `COGNITO_USER_POOL_ID` | Cognito User Pool ID for JWT validation |
+| `COGNITO_APP_CLIENT_ID` | Cognito App Client ID |
+| `COGNITO_REGION` | Cognito region |
 | `MAX_ITERATIONS` | Max LangGraph reasoning iterations (default: `10`) |
 | `LANGFUSE_PUBLIC_KEY` | Langfuse public key |
 | `LANGFUSE_SECRET_KEY` | Langfuse secret key |
@@ -227,6 +240,7 @@ Injected into the container by Agentcore Runtime:
 
 ```
 .
+├── demo.ipynb            # Demo notebook (5 queries, auth, Langfuse traces)
 ├── backend/
 │   ├── app/
 │   │   ├── main.py           # FastAPI app

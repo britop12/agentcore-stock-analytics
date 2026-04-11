@@ -4,7 +4,7 @@ langgraph==0.2.55
 langchain==0.3.9
 langchain-aws==0.2.9
 langfuse==2.57.3
-yfinance==0.2.50
+yfinance==1.2.1
 python-jose[cryptography]==3.3.0
 boto3==1.35.81
 hypothesis==6.122.3
