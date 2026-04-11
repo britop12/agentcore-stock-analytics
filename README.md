@@ -180,34 +180,6 @@ data: {"type": "final", "data": ""}
 
 ---
 
-## Updating the Agent
-
-To deploy code changes, bump the image tag and update the runtime:
-
-```bash
-ECR_URL=$(terraform -chdir=infra output -raw ecr_repository_url)
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-POOL_ID=$(terraform -chdir=infra output -raw cognito_user_pool_id)
-CLIENT_ID=$(terraform -chdir=infra output -raw cognito_user_pool_client_id)
-KB_ID=$(terraform -chdir=infra output -raw knowledge_base_id)
-
-docker build --platform linux/arm64 -t $ECR_URL:v1.0.1 ./backend
-docker push $ECR_URL:v1.0.1
-
-aws bedrock-agentcore-control update-agent-runtime \
-  --region us-east-1 \
-  --agent-runtime-id $RUNTIME_ID \
-  --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"$ECR_URL:v1.0.1\"}}" \
-  --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/stock-agent-agentcore-execution-role" \
-  --network-configuration '{"networkMode":"PUBLIC"}' \
-  --authorizer-configuration "{\"customJWTAuthorizer\":{\"discoveryUrl\":\"https://cognito-idp.us-east-1.amazonaws.com/$POOL_ID/.well-known/openid-configuration\",\"allowedAudience\":[\"$CLIENT_ID\"]}}" \
-  --environment-variables "{\"AWS_REGION\":\"us-east-1\",\"BEDROCK_KB_ID\":\"$KB_ID\",\"COGNITO_APP_CLIENT_ID\":\"$CLIENT_ID\",\"COGNITO_REGION\":\"us-east-1\",\"COGNITO_USER_POOL_ID\":\"$POOL_ID\",\"LANGFUSE_HOST\":\"<your-langfuse-host>\",\"LANGFUSE_PUBLIC_KEY\":\"<your-langfuse-public-key>\",\"LANGFUSE_SECRET_KEY\":\"<your-langfuse-secret-key>\",\"MAX_ITERATIONS\":\"10\"}"
-```
-
-> **Note:** `update-agent-runtime` replaces the full configuration. You must include all parameters (role, network, authorizer, environment variables) or they will be removed.
-
----
-
 ## Architecture
 
 - Authentication is handled by Agentcore's `customJWTAuthorizer` (validates Cognito JWTs before requests reach the container)
