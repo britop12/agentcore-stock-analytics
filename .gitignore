@@ -222,4 +222,4 @@ override.tf.json
 infra/modules/agentcore/runtime_id.txt
 
 # Kiro
-.kiro/
+*.kiro/
